@@ -1,0 +1,5 @@
+# Python dependencies for the HomePod control server + streamer.
+#   pip install -r requirements.txt
+# ffmpeg is also required but is NOT a pip package - install it separately and
+# put it on PATH (https://ffmpeg.org/download.html or `winget install ffmpeg`).
+pyatv>=0.14

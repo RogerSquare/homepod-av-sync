@@ -1,0 +1,19 @@
+# Local, machine-specific config (your selected HomePod) - do NOT commit
+homepod_config.json
+homepod_server.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build output
+dist/
+*.zip
+*.xpi
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
