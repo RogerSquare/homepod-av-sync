@@ -53,7 +53,8 @@
   let lastCapT = 0, raf = null;
   let frameCount = 0, lastErr = "";
   let hideMode = "visibility", lastQ = null, lastQT = 0; // perf hide + decode-freeze fallback
-  let lastBlankT = 0, blankSince = 0; // blank-capture (overlay-path) fallback
+  let lastBlankT = 0, blankSince = 0, blankLevel = 0; // blank-capture (overlay-path) escalation
+  let useBitmap = false, bmpPending = false;          // createImageBitmap capture (final fallback)
   let testFill = false, frmSample = "?", visSample = "?";
   let forceShow = false; // toolbar opened the panel on a page with no video
 
@@ -130,15 +131,18 @@
         const vw = video.videoWidth;
         const expectW = Math.max(2, Math.round(vw * Math.min(1, CFG.maxWidth / vw)));
         if (expectW !== bufW) buildRing();
-        try {
-          const e = ring[head];
-          e.octx.drawImage(video, 0, 0, bufW, bufH);
-          compositeSubCanvas(e.octx); // bake in canvas-overlay subs (jassub/Octopus)
-          e.t = t;
-          if (DEBUG && frameCount % 30 === 0) frmSample = sampleCenter(e.octx, bufW, bufH);
-          head = (head + 1) % ringCap;
-          frameCount++;
-        } catch (err) { lastErr = String(err.message || err); log("capture err", err); }
+        if (useBitmap) { captureViaBitmap(t); }
+        else {
+          try {
+            const e = ring[head];
+            e.octx.drawImage(video, 0, 0, bufW, bufH);
+            compositeSubCanvas(e.octx); // bake in canvas-overlay subs (jassub/Octopus)
+            e.t = t;
+            if (DEBUG && frameCount % 30 === 0) frmSample = sampleCenter(e.octx, bufW, bufH);
+            head = (head + 1) % ringCap;
+            frameCount++;
+          } catch (err) { lastErr = String(err.message || err); log("capture err", err); }
+        }
       }
 
       syncCanvasSize();
@@ -434,8 +438,33 @@
       return true;
     } catch (e) { return false; } // tainted/unreadable canvases still display - don't escalate
   }
+  // createImageBitmap reads the current decoded frame straight from the decoder,
+  // bypassing the GPU overlay/compositing path that drawImage can't read. It's
+  // async + a bit heavier, so it's only used once the cheap CSS fallbacks fail.
+  function captureViaBitmap(tcap) {
+    if (bmpPending) return; // don't pile up if decode is slower than our interval
+    bmpPending = true;
+    createImageBitmap(video, { resizeWidth: bufW, resizeHeight: bufH, resizeQuality: "low" })
+      .then((bmp) => {
+        bmpPending = false;
+        if (!ring || !video || !canvas) { bmp.close(); return; }
+        const e = ring[head];
+        try { e.octx.drawImage(bmp, 0, 0, bufW, bufH); } catch (err) { lastErr = String(err.message || err); }
+        bmp.close();
+        compositeSubCanvas(e.octx);
+        e.t = tcap;
+        head = (head + 1) % ringCap;
+        frameCount++;
+      })
+      .catch((err) => { bmpPending = false; lastErr = String(err && err.message || err); });
+  }
+
+  // Escalate while captured frames stay flat during playback:
+  //   level 0: visibility:hidden + filter  ->  level 1: opacity:0 (kept painted)
+  //   level 1: still flat (e.g. after a window resize)  ->  level 2: createImageBitmap
+  // We keep checking past the opacity stage so a later resize can reach level 2.
   function checkBlankCapture() {
-    if (!video || video.paused || hideMode === "opacity" || !ring || !video.videoWidth) return;
+    if (!video || video.paused || !ring || !video.videoWidth || blankLevel >= 2) return;
     const t = now();
     if (t - lastBlankT < 600) return;
     lastBlankT = t;
@@ -444,9 +473,14 @@
     if (frameLooksBlank(e.octx, bufW, bufH)) {
       if (!blankSince) blankSince = t;
       else if (t - blankSince > 1200) {
-        hideMode = "opacity";
-        applyHide();
-        log("flat capture under visibility:hidden -> opacity:0 fallback");
+        blankSince = 0;
+        if (blankLevel === 0) {
+          blankLevel = 1; hideMode = "opacity"; applyHide();
+          log("flat capture -> opacity:0 fallback");
+        } else {
+          blankLevel = 2; useBitmap = true;
+          log("flat capture persists -> createImageBitmap capture");
+        }
       }
     } else { blankSince = 0; }
   }
@@ -545,6 +579,7 @@
     // decode while hidden. (YouTube's earlier black was ambient mode, now killed.)
     hideMode = "visibility";
     lastQ = null; lastQT = 0;
+    blankLevel = 0; blankSince = 0; useBitmap = false; bmpPending = false;
     applyHide();
     v.addEventListener("seeking", flushRing);
     v.addEventListener("emptied", flushRing);
