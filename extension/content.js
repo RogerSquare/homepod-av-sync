@@ -53,6 +53,7 @@
   let lastCapT = 0, raf = null;
   let frameCount = 0, lastErr = "";
   let hideMode = "visibility", lastQ = null, lastQT = 0; // perf hide + decode-freeze fallback
+  let lastBlankT = 0, blankSince = 0; // blank-capture (overlay-path) fallback
   let testFill = false, frmSample = "?", visSample = "?";
   let forceShow = false; // toolbar opened the panel on a page with no video
 
@@ -122,6 +123,7 @@
       }
       enforceHide();        // keep the original hidden (player may reset it)
       checkDecodeFreeze();  // fall back to opacity:0 if a player stalls decode
+      checkBlankCapture();  // fall back to opacity:0 if frames read flat (overlay plane)
       const t = now();
       if (t - lastCapT >= 1000 / CFG.maxCaptureFps && !video.paused && video.videoWidth > 0) {
         lastCapT = t;
@@ -407,12 +409,46 @@
     if (hideMode === "visibility") {
       if (video.style.getPropertyValue("visibility") !== "hidden") applyHide();
     } else if (video.style.getPropertyValue("opacity") !== "0") applyHide();
-    // YouTube decodes on a GPU overlay plane that drawImage reads as black; a CSS
-    // filter forces it onto the normal (readable) compositing path. drawImage reads
-    // the raw decoded frame, so the filter doesn't alter what we capture.
-    if (isYouTube && video.style.getPropertyValue("filter") !== "brightness(1.001)") {
+    // Some players (YouTube, Plex) decode onto a GPU overlay plane that drawImage
+    // reads as a flat color (black/grey); a near-invisible CSS filter forces the
+    // video onto the normal (readable) compositing path. drawImage reads the raw
+    // decoded frame, so the 0.1% brightness change doesn't alter what we capture.
+    if (video.style.getPropertyValue("filter") !== "brightness(1.001)") {
       video.style.setProperty("filter", "brightness(1.001)", "important");
     }
+  }
+  // If frames keep reading as a flat color while the video is playing (the
+  // overlay-plane case the filter above didn't cure on its own), the element is
+  // probably not being painted under visibility:hidden. Fall back to opacity:0,
+  // which keeps it composited/readable. Mirrors checkDecodeFreeze().
+  function frameLooksBlank(octx, w, h) {
+    try {
+      const pts = [[w * 0.25, h * 0.5], [w * 0.5, h * 0.5], [w * 0.75, h * 0.5],
+                   [w * 0.5, h * 0.25], [w * 0.5, h * 0.75]];
+      let r0 = -1, g0 = -1, b0 = -1;
+      for (const [x, y] of pts) {
+        const d = octx.getImageData(x | 0, y | 0, 1, 1).data;
+        if (r0 < 0) { r0 = d[0]; g0 = d[1]; b0 = d[2]; }
+        else if (Math.abs(d[0] - r0) > 6 || Math.abs(d[1] - g0) > 6 || Math.abs(d[2] - b0) > 6) return false;
+      }
+      return true;
+    } catch (e) { return false; } // tainted/unreadable canvases still display - don't escalate
+  }
+  function checkBlankCapture() {
+    if (!video || video.paused || hideMode === "opacity" || !ring || !video.videoWidth) return;
+    const t = now();
+    if (t - lastBlankT < 600) return;
+    lastBlankT = t;
+    const e = ring[(head - 1 + ringCap) % ringCap]; // most recently captured frame
+    if (!e || e.t < 0) return;
+    if (frameLooksBlank(e.octx, bufW, bufH)) {
+      if (!blankSince) blankSince = t;
+      else if (t - blankSince > 1200) {
+        hideMode = "opacity";
+        applyHide();
+        log("flat capture under visibility:hidden -> opacity:0 fallback");
+      }
+    } else { blankSince = 0; }
   }
   function checkDecodeFreeze() {
     if (hideMode !== "visibility" || !video || video.paused) return;
