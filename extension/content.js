@@ -54,7 +54,9 @@
   let frameCount = 0, lastErr = "";
   let hideMode = "visibility", lastQ = null, lastQT = 0; // perf hide + decode-freeze fallback
   let lastBlankT = 0, blankSince = 0, blankLevel = 0; // blank-capture (overlay-path) escalation
-  let useBitmap = false, bmpPending = false;          // createImageBitmap capture (final fallback)
+  let useClone = false, cloneVideo = null;            // off-DOM captureStream clone (final fallback)
+  let antiOverlay = false;                            // alternate the filter each frame to defeat the GPU overlay
+  const unreadable = new WeakSet();                   // videos whose frames are locked in a GPU overlay - leave them live
   let testFill = false, frmSample = "?", visSample = "?";
   let forceShow = false; // toolbar opened the panel on a page with no video
 
@@ -66,6 +68,7 @@
   function findBestVideo() {
     let best = null, bestArea = 0;
     for (const v of document.querySelectorAll("video")) {
+      if (unreadable.has(v)) continue; // frames locked in a GPU overlay; can't delay it
       const r = v.getBoundingClientRect();
       if (r.width < CFG.minVideoW || r.height < CFG.minVideoH) continue;
       if (v.readyState < 1) continue;
@@ -124,25 +127,26 @@
       }
       enforceHide();        // keep the original hidden (player may reset it)
       checkDecodeFreeze();  // fall back to opacity:0 if a player stalls decode
-      checkBlankCapture();  // fall back to opacity:0 if frames read flat (overlay plane)
+      checkBlankCapture();  // escalate (or give up) if frames read flat (overlay plane)
+      if (!video) return;   // checkBlankCapture may have given up and detached
       const t = now();
       if (t - lastCapT >= 1000 / CFG.maxCaptureFps && !video.paused && video.videoWidth > 0) {
         lastCapT = t;
         const vw = video.videoWidth;
         const expectW = Math.max(2, Math.round(vw * Math.min(1, CFG.maxWidth / vw)));
         if (expectW !== bufW) buildRing();
-        if (useBitmap) { captureViaBitmap(t); }
-        else {
-          try {
-            const e = ring[head];
-            e.octx.drawImage(video, 0, 0, bufW, bufH);
-            compositeSubCanvas(e.octx); // bake in canvas-overlay subs (jassub/Octopus)
-            e.t = t;
-            if (DEBUG && frameCount % 30 === 0) frmSample = sampleCenter(e.octx, bufW, bufH);
-            head = (head + 1) % ringCap;
-            frameCount++;
-          } catch (err) { lastErr = String(err.message || err); log("capture err", err); }
-        }
+        // Capture from the off-DOM clone if we escalated to it (it's never on the
+        // overlay plane); otherwise straight from the page's video element.
+        const cap = (useClone && cloneVideo && cloneVideo.videoWidth) ? cloneVideo : video;
+        try {
+          const e = ring[head];
+          e.octx.drawImage(cap, 0, 0, bufW, bufH);
+          compositeSubCanvas(e.octx); // bake in canvas-overlay subs (jassub/Octopus)
+          e.t = t;
+          if (DEBUG && frameCount % 30 === 0) frmSample = sampleCenter(e.octx, bufW, bufH);
+          head = (head + 1) % ringCap;
+          frameCount++;
+        } catch (err) { lastErr = String(err.message || err); log("capture err", err); }
       }
 
       syncCanvasSize();
@@ -387,6 +391,7 @@
     vctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
     vctx.fillStyle = "#00ff66"; vctx.font = "bold 15px system-ui";
     vctx.fillText(`hpsync ${canvas.width}x${canvas.height} f:${frameCount} frm:${frmSample} vw:${video.videoWidth} paused:${video.paused}`, 14, 24);
+    vctx.fillText(`lvl:${blankLevel} clone:${useClone}/${cloneVideo ? (cloneVideo.videoWidth || 0) : "-"} hide:${hideMode} anti:${antiOverlay}`, 14, 98);
     const cp = canvas.parentElement ? (canvas.parentElement.className || canvas.parentElement.tagName).slice(0, 28) : "NONE";
     const vp = video.parentElement ? (video.parentElement.className || video.parentElement.tagName).slice(0, 28) : "NONE";
     vctx.fillText(`conn:${canvas.isConnected} samePar:${canvas.parentElement === video.parentElement}`, 14, 44);
@@ -417,8 +422,14 @@
     // reads as a flat color (black/grey); a near-invisible CSS filter forces the
     // video onto the normal (readable) compositing path. drawImage reads the raw
     // decoded frame, so the 0.1% brightness change doesn't alter what we capture.
-    if (video.style.getPropertyValue("filter") !== "brightness(1.001)") {
-      video.style.setProperty("filter", "brightness(1.001)", "important");
+    // A *static* filter isn't always enough: a window resize re-promotes the
+    // video back onto the overlay. So once we've seen the overlay (antiOverlay),
+    // we alternate the filter value every frame, which forces Firefox to keep
+    // re-compositing it onto a readable layer and never settle back on the overlay.
+    const want = antiOverlay ? `brightness(${(frameCount & 1) ? "1.001" : "1.002"})`
+                             : "brightness(1.001)";
+    if (video.style.getPropertyValue("filter") !== want) {
+      video.style.setProperty("filter", want, "important");
     }
   }
   // If frames keep reading as a flat color while the video is playing (the
@@ -438,33 +449,39 @@
       return true;
     } catch (e) { return false; } // tainted/unreadable canvases still display - don't escalate
   }
-  // createImageBitmap reads the current decoded frame straight from the decoder,
-  // bypassing the GPU overlay/compositing path that drawImage can't read. It's
-  // async + a bit heavier, so it's only used once the cheap CSS fallbacks fail.
-  function captureViaBitmap(tcap) {
-    if (bmpPending) return; // don't pile up if decode is slower than our interval
-    bmpPending = true;
-    createImageBitmap(video, { resizeWidth: bufW, resizeHeight: bufH, resizeQuality: "low" })
-      .then((bmp) => {
-        bmpPending = false;
-        if (!ring || !video || !canvas) { bmp.close(); return; }
-        const e = ring[head];
-        try { e.octx.drawImage(bmp, 0, 0, bufW, bufH); } catch (err) { lastErr = String(err.message || err); }
-        bmp.close();
-        compositeSubCanvas(e.octx);
-        e.t = tcap;
-        head = (head + 1) % ringCap;
-        frameCount++;
-      })
-      .catch((err) => { bmpPending = false; lastErr = String(err && err.message || err); });
+  // Final fallback: mirror the video's decoded frames into a detached <video>
+  // via captureStream(). The clone is never added to the DOM, so it can't be
+  // promoted to a hardware overlay - drawImage(clone) always reads real pixels,
+  // no matter what compositing path the page's own element is stuck on.
+  function setupClone() {
+    if (cloneVideo) return true;
+    try {
+      const cap = video.captureStream ? video.captureStream()
+                : (video.mozCaptureStream ? video.mozCaptureStream() : null);
+      if (!cap) { log("captureStream unavailable"); return false; }
+      cloneVideo = document.createElement("video");
+      cloneVideo.muted = true; cloneVideo.defaultMuted = true; cloneVideo.playsInline = true;
+      cloneVideo.srcObject = cap; // off-DOM on purpose: keeps it off the overlay plane
+      const p = cloneVideo.play(); if (p && p.catch) p.catch(() => {});
+      log("clone capture via captureStream");
+      return true;
+    } catch (e) { lastErr = String(e.message || e); cloneVideo = null; return false; }
+  }
+  function teardownClone() {
+    if (cloneVideo) {
+      try { cloneVideo.pause(); cloneVideo.srcObject = null; } catch (e) { /* */ }
+      cloneVideo = null;
+    }
+    useClone = false;
   }
 
   // Escalate while captured frames stay flat during playback:
-  //   level 0: visibility:hidden + filter  ->  level 1: opacity:0 (kept painted)
-  //   level 1: still flat (e.g. after a window resize)  ->  level 2: createImageBitmap
-  // We keep checking past the opacity stage so a later resize can reach level 2.
+  //   level 0: visibility:hidden + filter
+  //   level 1: anti-overlay (per-frame filter) + opacity:0
+  //   level 2: off-DOM captureStream clone (overlay-proof; reads real pixels)
+  // We keep checking past level 1 so a later window resize can reach level 2.
   function checkBlankCapture() {
-    if (!video || video.paused || !ring || !video.videoWidth || blankLevel >= 2) return;
+    if (!video || video.paused || !ring || !video.videoWidth || blankLevel >= 3) return;
     const t = now();
     if (t - lastBlankT < 600) return;
     lastBlankT = t;
@@ -475,11 +492,24 @@
       else if (t - blankSince > 1200) {
         blankSince = 0;
         if (blankLevel === 0) {
-          blankLevel = 1; hideMode = "opacity"; applyHide();
-          log("flat capture -> opacity:0 fallback");
+          blankLevel = 1; antiOverlay = true; hideMode = "opacity"; applyHide();
+          log("flat capture -> anti-overlay filter + opacity:0");
+        } else if (blankLevel === 1) {
+          blankLevel = 2;
+          useClone = setupClone(); // overlay-proof off-DOM clone
+          if (useClone) { antiOverlay = false; } // reading the clone now; stop fighting the overlay
+          log("flat capture persists -> captureStream clone (" + useClone + ")");
         } else {
-          blankLevel = 2; useBitmap = true;
-          log("flat capture persists -> createImageBitmap capture");
+          // Even the clone reads flat: frames are locked in a GPU hardware overlay
+          // that no canvas/captureStream read can touch (Firefox DirectComposition
+          // video overlay). Give up gracefully - restore the live video so the user
+          // isn't stuck on grey - and point them to the one-time about:config fix.
+          blankLevel = 3;
+          unreadable.add(video);
+          toast("Can't delay this video: Firefox's hardware video overlay hides it from capture. " +
+                "One-time fix - open about:config, set gfx.webrender.dcomp-video-overlay-win to false, restart.");
+          log("flat capture unrecoverable -> giving up (GPU overlay); video left live");
+          detach();
         }
       }
     } else { blankSince = 0; }
@@ -579,7 +609,7 @@
     // decode while hidden. (YouTube's earlier black was ambient mode, now killed.)
     hideMode = "visibility";
     lastQ = null; lastQT = 0;
-    blankLevel = 0; blankSince = 0; useBitmap = false; bmpPending = false;
+    blankLevel = 0; blankSince = 0; useClone = false; antiOverlay = false; teardownClone();
     applyHide();
     v.addEventListener("seeking", flushRing);
     v.addEventListener("emptied", flushRing);
@@ -594,6 +624,7 @@
       restoreTracks();
       teardownDomSubs();
       teardownSubCanvas();
+      teardownClone();
       restoreYouTubeAmbient();
       video.style.removeProperty("visibility");
       video.style.removeProperty("opacity");

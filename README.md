@@ -120,7 +120,9 @@ The streamer also has standalone scripts in `server/`:
   canvas subs are all handled).
 - **Won't work on:** DRM-protected media (Netflix/Disney+, some Plex titles) -
   the browser returns black frames. **YouTube ambient mode** also breaks capture,
-  so the extension auto-disables it while syncing.
+  so the extension auto-disables it while syncing. On **Firefox/Windows**, the
+  GPU hardware video overlay can hide frames from capture (grey picture) - see
+  Troubleshooting for the one-time `about:config` fix.
 - Latency is inherent to AirPlay (~2.5 s); fine for music, and matched for video.
 
 ## Configuration
@@ -141,6 +143,21 @@ The streamer also has standalone scripts in `server/`:
   `http://127.0.0.1:17645/status`.
 - **Video is black on a site:** DRM-protected media (can't capture) - use
   **Disable here**. On YouTube, ambient mode is handled automatically.
+- **Grey video on Firefox (esp. Plex after a window resize or using its
+  mini-player):** Firefox's *hardware video overlay* (DirectComposition) keeps
+  the decoded frames in GPU memory where no canvas read can reach them, so the
+  delayed picture comes out flat grey. The extension auto-detects this and, after
+  a couple seconds, restores the live (un-delayed) video and shows a one-time
+  notice rather than leaving a grey screen. To get the *delayed* picture back,
+  apply this one-time browser setting:
+  1. Open `about:config` (accept the warning).
+  2. Search `gfx.webrender.dcomp-video-overlay-win` and set it to **false**.
+     (If your build also lists `...dcomp-video-hw-overlay-win` /
+     `...dcomp-video-sw-overlay-win`, set those to **false** too.)
+  3. Restart Firefox/Zen.
+
+  This disables only the video overlay (hardware decoding/acceleration stay on),
+  so the cost is negligible. Chromium/Edge isn't affected by this overlay.
 - **No audio on HomePod:** check the capture device
   (`python server\homepod_stream.py --list`) and that audio is actually routed
   to it (Wave Link Stream Mix / VB-Cable), or pick it in the popup's **Audio** list.
