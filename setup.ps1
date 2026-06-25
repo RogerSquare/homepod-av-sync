@@ -13,9 +13,20 @@ $taskName = "HomePodSync"
 
 Write-Host "=== HomePod A/V Sync setup ===" -ForegroundColor Cyan
 
-# 1. Python
-$py = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $py) { Write-Host "ERROR: Python not found on PATH. Install Python 3.9+ and re-run." -ForegroundColor Red; return }
+# 1. Python - pick a real interpreter, NOT the Microsoft Store stub
+#    (WindowsApps\python.exe runs in an AppContainer and can't find ffmpeg/atvremote).
+$cands = @()
+Get-Command python.exe -All -ErrorAction SilentlyContinue | ForEach-Object { $cands += $_.Source }
+$cands += "$env:USERPROFILE\Miniconda3\python.exe", "$env:USERPROFILE\Anaconda3\python.exe"
+$py = $null
+foreach ($c in $cands) {
+  if (-not (Test-Path $c)) { continue }
+  if ($c -match 'WindowsApps') { continue }          # skip the Store alias
+  if (-not $py) { $py = $c }                          # first real python as fallback
+  & $c -c "import pyatv" 2>$null
+  if ($LASTEXITCODE -eq 0) { $py = $c; break }        # prefer one that already has pyatv
+}
+if (-not $py) { Write-Host "ERROR: No suitable Python found. Install Python 3.9+ (not the Store version)." -ForegroundColor Red; return }
 Write-Host "Python:  $py"
 
 # 2. ffmpeg (try winget if missing)

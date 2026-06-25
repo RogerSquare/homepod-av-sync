@@ -27,6 +27,11 @@
     .statusrow:hover { background: #30303a; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #666; flex: 0 0 auto; }
     .hint { font-size: 10px; color: #9a9aa4; margin-top: 8px; }
+    .volrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+    .volrow .lbl { font-size: 11px; color: #cfcfd6; flex: 0 0 auto; width: 26px; }
+    .volrow input[type=range] { flex: 1 1 auto; min-width: 0; accent-color: #36c46a; }
+    .volrow input[type=range]:disabled { opacity: 0.4; }
+    .volrow .val { font-size: 11px; color: #cfcfd6; flex: 0 0 auto; width: 26px; text-align: right; }
     .devhead { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; gap: 6px; }
     .devname { flex: 1 1 auto; min-width: 0; font-size: 11px; color: #cfcfd6;
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -53,6 +58,11 @@
   </div>
   <div class="statusrow" id="syncRow"><span>Sync</span><span class="dot" id="syncDot"></span></div>
   <div class="statusrow" id="hpRow"><span>HomePod</span><span class="dot" id="hpDot"></span></div>
+  <div class="volrow">
+    <span class="lbl">Vol</span>
+    <input type="range" id="volSlider" min="0" max="100" value="50">
+    <span class="val" id="volVal">50</span>
+  </div>
   <div class="devhead">
     <span class="devname" id="devName">Device: default</span>
     <button id="scanBtn">Scan</button>

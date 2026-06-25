@@ -9,17 +9,18 @@ const ext = globalThis.browser ?? globalThis.chrome;
 
 const el = (id) => document.getElementById(id);
 const state = { delayMs: 2500, enabled: true, homepod: "unknown", hasVideo: false, device: null,
-                audioDevice: null, host: "", blacklist: [] };
+                audioDevice: null, volume: 50, host: "", blacklist: [] };
 
 async function loadSettings() {
   try {
-    const o = await ext.storage.local.get(["delayMs", "enabled"]);
+    const o = await ext.storage.local.get(["delayMs", "enabled", "volume"]);
     if (typeof o.delayMs === "number") state.delayMs = o.delayMs;
     if (typeof o.enabled === "boolean") state.enabled = o.enabled;
+    if (typeof o.volume === "number") state.volume = o.volume;
   } catch (e) { /* */ }
 }
 function saveSettings() {
-  try { ext.storage.local.set({ delayMs: state.delayMs, enabled: state.enabled }); } catch (e) { /* */ }
+  try { ext.storage.local.set({ delayMs: state.delayMs, enabled: state.enabled, volume: state.volume }); } catch (e) { /* */ }
 }
 
 function sendBg(msg) {
@@ -207,6 +208,10 @@ function render() {
   const audTxt = "Audio: " + (state.audioDevice || "default");
   el("audioName").textContent = audTxt; el("audioName").title = audTxt;
 
+  // Volume needs a selected HomePod.
+  el("volSlider").disabled = !state.device;
+  el("volSlider").title = state.device ? "" : "Scan and select a HomePod first";
+
   el("hint").textContent = state.hasVideo
     ? "Tune until lips match the HomePod."
     : "No video detected on this tab.";
@@ -235,8 +240,18 @@ el("scanBtn").addEventListener("click", scanDevices);
 el("audioBtn").addEventListener("click", listAudio);
 el("siteBtn").addEventListener("click", toggleSite);
 
+// Volume: update the number live while dragging; send to the HomePod on release.
+el("volSlider").addEventListener("input", () => { el("volVal").textContent = el("volSlider").value; });
+el("volSlider").addEventListener("change", () => {
+  state.volume = parseInt(el("volSlider").value, 10);
+  saveSettings();
+  serverCall("volume", { level: state.volume }).catch(() => {});
+});
+
 (async () => {
   await loadSettings();
+  el("volSlider").value = state.volume;
+  el("volVal").textContent = state.volume;
   render();
   await loadSite();
   const cs = await askContent({ type: "hpsync-getstate" });

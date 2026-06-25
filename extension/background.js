@@ -20,7 +20,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   if (msg.type === "hpsync-homepod") { // cmd: status | start | stop
     serverGet(msg.cmd)
-      .then((j) => sendResponse({ ok: true, running: !!j.running, device: j.device, audio_device: j.audio_device }))
+      .then((j) => sendResponse({ ok: true, running: !!j.running, dropped: !!j.dropped, device: j.device, audio_device: j.audio_device }))
       .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
     return true;
   }

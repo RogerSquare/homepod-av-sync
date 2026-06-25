@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -46,6 +47,19 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # hide console windows (
 
 _proc = None
 _lock = threading.Lock()
+_user_stopped = False   # last stop() was a deliberate user/extension stop
+_dropped = False        # streamer exited on its own (HomePod taken over / connection lost)
+
+
+def _refresh_state():
+    """Detect when the streamer exited by itself (e.g. another device took over
+    the HomePod) so /status can report it as a 'dropped' connection."""
+    global _proc, _dropped
+    with _lock:
+        if _proc is not None and _proc.poll() is not None:
+            if not _user_stopped:
+                _dropped = True
+            _proc = None
 
 
 def load_config():
@@ -99,9 +113,8 @@ def scan_devices():
 
 def audio_devices():
     """List DirectShow audio capture devices (what the streamer can capture)."""
-    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
     p = subprocess.run(
-        [ffmpeg, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+        [ffmpeg_path(), "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
         capture_output=True, text=True, creationflags=NO_WINDOW,
     )
     devices, in_audio = [], False
@@ -123,15 +136,64 @@ def audio_devices():
     return devices
 
 
+# Invoke atvremote as a module via the running Python so it works no matter what
+# is on PATH (the bare `atvremote` exe often isn't, e.g. under the Store Python).
+ATVREMOTE = [sys.executable, "-m", "pyatv.scripts.atvremote"]
+
+
+def ffmpeg_path():
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    cand = os.path.join(os.path.dirname(sys.executable), "Library", "bin", "ffmpeg.exe")
+    return cand if os.path.exists(cand) else "ffmpeg"
+
+
+def set_homepod_volume(level):
+    """Set the selected HomePod's volume (0-100) via a quick atvremote call."""
+    dev = selected_device()
+    if not (dev and dev.get("id")):
+        raise RuntimeError("no HomePod selected")
+    subprocess.run(ATVREMOTE + ["--id", dev["id"], f"set_volume={level}"],
+                   capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW)
+
+
+def get_homepod_volume():
+    dev = selected_device()
+    if not (dev and dev.get("id")):
+        return None
+    p = subprocess.run(ATVREMOTE + ["--id", dev["id"], "volume"],
+                       capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW)
+    m = re.search(r"(\d+(?:\.\d+)?)", p.stdout)
+    return round(float(m.group(1))) if m else None
+
+
+def now_playing_title():
+    """Return the HomePod's current Title/Artist/Album, or None. Our own stream
+    sets no metadata, so any value here means another device is playing to it."""
+    dev = selected_device()
+    if not (dev and dev.get("id")):
+        return None
+    p = subprocess.run(ATVREMOTE + ["--id", dev["id"], "playing"],
+                       capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW)
+    for line in p.stdout.splitlines():
+        m = re.match(r"\s*(?:Title|Artist|Album):\s*(\S.*)$", line)
+        if m and m.group(1).strip() not in ("", "-"):
+            return m.group(1).strip()
+    return None
+
+
 def is_running():
     return _proc is not None and _proc.poll() is None
 
 
 def start():
-    global _proc
+    global _proc, _user_stopped, _dropped
     with _lock:
         if is_running():
             return
+        _user_stopped = False
+        _dropped = False
         args = [PYTHON, STREAMER]
         cfg = load_config()
         dev = cfg.get("device")
@@ -149,9 +211,54 @@ def start():
               f"device={dev['name'] if dev else 'default'}")
 
 
-def stop():
+def _kill_streamer():
+    """Kill the streamer without marking it a user stop (used on takeover)."""
     global _proc
     with _lock:
+        if is_running():
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(_proc.pid)],
+                           capture_output=True, creationflags=NO_WINDOW)
+        _proc = None
+
+
+def _takeover_monitor():
+    """Persistent push-updates listener for near-instant takeover detection.
+    The HomePod pushes a state change the moment another device plays; our own
+    stream sets no metadata, so any Title/Artist while we're streaming means we
+    were taken over -> yield the HomePod and flag a drop."""
+    global _dropped
+    while True:
+        dev = selected_device()
+        if not (dev and dev.get("id")):
+            time.sleep(5)
+            continue
+        started = time.monotonic()
+        try:
+            proc = subprocess.Popen(
+                ATVREMOTE + ["--id", dev["id"], "push_updates"],
+                stdin=subprocess.PIPE,  # keep open so push_updates doesn't exit on stdin EOF
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                creationflags=NO_WINDOW,
+            )
+            for line in proc.stdout:  # blocks until the HomePod pushes an update
+                m = re.match(r"\s*(?:Title|Artist|Album):\s*(\S.*)$", line)
+                if m and m.group(1).strip() not in ("", "-") and is_running() and not _user_stopped:
+                    print("[server] takeover detected (push); yielding HomePod")
+                    with _lock:
+                        _dropped = True
+                    _kill_streamer()
+            proc.wait()
+        except Exception:
+            pass
+        # Back off hard if the listener died almost immediately (avoid spawn spin).
+        time.sleep(15 if (time.monotonic() - started) < 3 else 3)
+
+
+def stop():
+    global _proc, _user_stopped, _dropped
+    with _lock:
+        _user_stopped = True
+        _dropped = False
         if is_running():
             # Kill the whole tree (python -> ffmpeg, shim -> atvremote).
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(_proc.pid)],
@@ -177,7 +284,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path.rstrip("/")
         if path in ("", "/status"):
-            self._send(200, {"running": is_running(), "device": selected_device(),
+            _refresh_state()
+            self._send(200, {"running": is_running(), "dropped": _dropped,
+                             "device": selected_device(),
                              "audio_device": load_config().get("audio_device")})
         elif path in ("/start", "/stop"):
             if not self._token_ok():
@@ -221,6 +330,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"devices": audio_devices()})
             except Exception as e:
                 self._send(500, {"error": str(e)})
+        elif path == "/volume":
+            q = parse_qs(urlparse(self.path).query)
+            level = q.get("level", [None])[0]
+            if level is None:  # GET current volume
+                try:
+                    self._send(200, {"volume": get_homepod_volume()})
+                except Exception as e:
+                    self._send(500, {"error": str(e)})
+            else:              # SET volume (token required)
+                if not self._token_ok():
+                    self._send(403, {"error": "bad token"})
+                    return
+                try:
+                    lvl = max(0, min(100, int(float(level))))
+                    set_homepod_volume(lvl)
+                    self._send(200, {"volume": lvl})
+                except Exception as e:
+                    self._send(500, {"error": str(e)})
         elif path == "/audio-device":
             self._send(200, {"audio_device": load_config().get("audio_device")})
         elif path == "/audio-device/set":
@@ -246,15 +373,29 @@ class Handler(BaseHTTPRequestHandler):
         pass  # quiet
 
 
+class _Server(ThreadingHTTPServer):
+    # On Windows, allow_reuse_address=True (the default) lets MULTIPLE instances
+    # bind the same port - so re-running the server stacks duplicates. Refuse it.
+    allow_reuse_address = False
+
+
 if __name__ == "__main__":
     # When launched with pythonw (hidden background task) there's no console, so
     # stdout/stderr are None and print() would crash. Redirect to a log file.
     if sys.stdout is None or sys.stderr is None:
         _log = open(os.path.join(HERE, "homepod_server.log"), "a", buffering=1, encoding="utf-8")
         sys.stdout = sys.stderr = _log
+    # Bind first; if another instance already owns the port, exit quietly WITHOUT
+    # starting the takeover monitor (avoids orphaned push-update listeners).
+    try:
+        httpd = _Server((HOST, PORT), Handler)
+    except OSError:
+        print(f"[server] port {PORT} already in use - another instance is running. Exiting.")
+        sys.exit(0)
+    threading.Thread(target=_takeover_monitor, daemon=True).start()
     print(f"HomePod control server on http://{HOST}:{PORT}  (Ctrl+C to quit)")
     try:
-        ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+        httpd.serve_forever()
     except KeyboardInterrupt:
         stop()
         print("\n[server] bye")

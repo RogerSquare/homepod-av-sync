@@ -39,13 +39,18 @@ AUDIO_BUFFER_MS = "20"                        # dshow capture buffer; lower = le
 LATENCY_MS = 200                              # RAOP buffer-ahead; dial lower for live
 RESTART_DELAY = 3                            # seconds to wait before reconnecting
 
-# Resolve tools from PATH so this is portable across machines (ffmpeg + pyatv's
-# atvremote must be installed and on PATH). Falls back to the bare name, which
-# subprocess still resolves via PATH at launch.
+# Resolve tools robustly (PATH may not include them - e.g. under the Store Python).
 import shutil
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-ATVREMOTE = shutil.which("atvremote") or "atvremote"
+def _resolve_ffmpeg():
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    cand = os.path.join(os.path.dirname(sys.executable), "Library", "bin", "ffmpeg.exe")  # conda layout
+    return cand if os.path.exists(cand) else "ffmpeg"
+FFMPEG = _resolve_ffmpeg()
 PYTHON = sys.executable
+# Run atvremote as a module via this Python so it works regardless of PATH.
+ATVREMOTE = [PYTHON, "-m", "pyatv.scripts.atvremote"]
 SHIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "atvremote_lowlatency.py")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # hide console windows on Windows
 
@@ -81,7 +86,7 @@ def set_volume(volume):
     """One-shot: set HomePod volume (0-100) before streaming starts."""
     print(f"[homepod-stream] setting HomePod volume to {volume}")
     subprocess.run(
-        [ATVREMOTE, "--id", HOMEPOD_ID, f"set_volume={volume}"],
+        ATVREMOTE + ["--id", HOMEPOD_ID, f"set_volume={volume}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW,
     )
 
@@ -197,15 +202,27 @@ def main():
     print("[homepod-stream] control what plays via Wave Link's Stream-Mix faders.")
     print("[homepod-stream] press Ctrl+C to stop.\n")
 
+    # Retry a few times for transient connect hiccups, but YIELD (exit) once a
+    # session that was actually streaming drops - that means the HomePod got
+    # taken over (or the network dropped). Exiting lets the control server flag
+    # the connection as lost so the extension can pause the video; the user
+    # reclaims the HomePod by pressing play again.
+    attempts = 0
     while not _stop:
+        t0 = time.monotonic()
         stream_once(args.device, args.latency_ms)
         if _stop:
             break
-        print(f"[homepod-stream] stream ended; reconnecting in {RESTART_DELAY}s...")
-        for _ in range(RESTART_DELAY * 2):
-            if _stop:
-                break
-            time.sleep(0.5)
+        ran = time.monotonic() - t0
+        if ran >= 5:
+            print("[homepod-stream] connection lost (HomePod taken over or network). Yielding.")
+            break
+        attempts += 1
+        if attempts >= 3:
+            print("[homepod-stream] could not establish a stable connection. Giving up.")
+            break
+        print(f"[homepod-stream] reconnecting ({attempts}/3)...")
+        time.sleep(2)
 
     print("[homepod-stream] stopped.")
 

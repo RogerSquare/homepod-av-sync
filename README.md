@@ -98,9 +98,14 @@ Open the toolbar popup:
 - **Delay** + tune buttons - adjust until lips match the HomePod.
 - **Sync** - turn the video delay on/off.
 - **HomePod** - connect/disconnect the audio stream (needs the server).
+- **Vol** - slider to set the HomePod's volume (needs a selected HomePod).
 - **Device** + **Scan** - find and select which HomePod to use.
 - **Audio** - list and select which capture device to stream from.
 - **Disable here / Enable here** - blacklist the current site (per-host, live).
+
+If another device takes over the HomePod (e.g. AirPlays music to it), the
+stream yields and the **video auto-pauses** with a notice. Press play to
+reclaim the HomePod and resume in sync.
 
 The streamer also has standalone scripts in `server/`:
 `Start-HomePodStream.bat` (stream without the extension) and `Tune-Latency.bat`

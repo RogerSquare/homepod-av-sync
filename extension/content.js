@@ -539,6 +539,7 @@
   // connection state so it can auto-cut/resume the stream on pause/play.
   let homepodState = "unknown"; // running | stopped | off | unknown
   let autoPaused = false;       // stream stopped because the video is paused
+  let droppedPaused = false;    // video paused because the HomePod connection dropped
   let pauseTimer = null;
 
   const isMainVideo = (t) => t && t.tagName === "VIDEO"
@@ -556,7 +557,9 @@
     if (!isMainVideo(e.target)) return;
     tick(); // attach immediately when a video starts (don't wait for the poll)
     clearTimeout(pauseTimer);
-    if (autoPaused) { autoPaused = false; homepodCmd("start"); }
+    // Resume the stream whether we paused for a user-pause or a dropped HomePod
+    // (pressing play reclaims the HomePod).
+    if (autoPaused || droppedPaused) { autoPaused = false; droppedPaused = false; homepodCmd("start"); }
   }
 
   function sendBg(msg) {
@@ -566,7 +569,34 @@
   async function homepodCmd(cmd) {
     const resp = await sendBg({ type: "hpsync-homepod", cmd });
     homepodState = !resp || !resp.ok ? "off" : (resp.running ? "running" : "stopped");
+    // HomePod connection dropped (another device took over) -> pause the video so
+    // it doesn't keep playing without sound; play again to reclaim the HomePod.
+    if (resp && resp.ok && resp.dropped && video && !video.paused) {
+      droppedPaused = true;
+      try { video.pause(); } catch (e) { /* */ }
+      toast("HomePod taken over - video paused. Press play to reclaim it.");
+    }
     return resp;
+  }
+
+  // Brief on-page notice (auto-dismisses).
+  let toastEl = null, toastTimer = null;
+  function toast(msg) {
+    if (!toastEl) {
+      toastEl = document.createElement("div");
+      Object.assign(toastEl.style, {
+        position: "fixed", bottom: "24px", left: "50%", transform: "translateX(-50%)",
+        zIndex: "2147483647", background: "rgba(20,20,24,0.95)", color: "#eaeaea",
+        font: "13px system-ui, sans-serif", padding: "10px 16px", borderRadius: "8px",
+        border: "1px solid #3a3a44", boxShadow: "0 6px 20px rgba(0,0,0,0.5)", pointerEvents: "none",
+        transition: "opacity 0.3s",
+      });
+    }
+    toastEl.textContent = msg;
+    if (!toastEl.isConnected) document.documentElement.appendChild(toastEl);
+    toastEl.style.opacity = "1";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { if (toastEl) toastEl.style.opacity = "0"; }, 4000);
   }
 
   // ---- Main tick: track the page's best video -----------------------------
@@ -631,7 +661,7 @@
     });
     // Poll connection state (for pause/resume gating) only while a video is here.
     homepodCmd("status").catch(() => {});
-    setInterval(() => { if (detectedVideo) homepodCmd("status").catch(() => {}); }, 5000);
+    setInterval(() => { if (detectedVideo) homepodCmd("status").catch(() => {}); }, 2000);
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
