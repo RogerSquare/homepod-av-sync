@@ -638,30 +638,24 @@
 
   // ---- HomePod connection (via local control server) ----------------------
   // The control UI lives in the browser-action popup now; this only tracks
-  // connection state so it can auto-cut/resume the stream on pause/play.
+  // connection state and reclaims the HomePod after a takeover.
   let homepodState = "unknown"; // running | stopped | off | unknown
-  let autoPaused = false;       // stream stopped because the video is paused
-  let droppedPaused = false;    // video paused because the HomePod connection dropped
-  let pauseTimer = null;
+  let droppedPaused = false;    // video paused because the HomePod connection dropped (takeover)
 
   const isMainVideo = (t) => t && t.tagName === "VIDEO"
     && t.getBoundingClientRect().width >= CFG.minVideoW;
 
-  function onMediaPause(e) {
-    if (!isMainVideo(e.target) || homepodState !== "running") return;
-    clearTimeout(pauseTimer);
-    // Debounce so scrubbing (pause->play) doesn't thrash the stream.
-    pauseTimer = setTimeout(() => {
-      if (e.target.paused) { autoPaused = true; homepodCmd("stop"); }
-    }, 250);
-  }
+  // We intentionally do NOT stop the HomePod stream when a video pauses. The
+  // stream carries continuous Windows audio (Wave Link), so it should stay
+  // connected regardless of any single video's play state. Pausing a video just
+  // makes that app go silent on the Stream Mix. (Tab switches and page refreshes
+  // also fire 'pause' - stopping on pause is what used to disconnect the HomePod.)
   function onMediaPlay(e) {
     if (!isMainVideo(e.target)) return;
     tick(); // attach immediately when a video starts (don't wait for the poll)
-    clearTimeout(pauseTimer);
-    // Resume the stream whether we paused for a user-pause or a dropped HomePod
-    // (pressing play reclaims the HomePod).
-    if (autoPaused || droppedPaused) { autoPaused = false; droppedPaused = false; homepodCmd("start"); }
+    // Reconnect only after an actual HomePod takeover (we paused the video then);
+    // pressing play reclaims it.
+    if (droppedPaused) { droppedPaused = false; homepodCmd("start"); }
   }
 
   function sendBg(msg) {
@@ -746,8 +740,8 @@
     tick();
     setInterval(tick, 1000);
     document.addEventListener("yt-navigate-finish", () => setTimeout(tick, 400));
-    // play/pause don't bubble, so listen in the capture phase.
-    document.addEventListener("pause", onMediaPause, true);
+    // play doesn't bubble, so listen in the capture phase. (No pause handler:
+    // we keep the HomePod connected regardless of video pause/tab/refresh.)
     document.addEventListener("play", onMediaPlay, true);
     // Attach as soon as a video is ready, instead of waiting for the 1s poll.
     document.addEventListener("loadeddata", () => tick(), true);
