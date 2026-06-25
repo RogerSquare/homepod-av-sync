@@ -1,14 +1,24 @@
 {
   "manifest_version": 3,
   "name": "HomePod A/V Sync",
-  "version": "1.8",
+  "version": "1.9",
   "description": "Delays a web video's picture to match delayed HomePod/AirPlay audio so lips stay in sync. Works on YouTube, Plex, anime sites, and most HTML5 players. Audio is untouched and keeps flowing live to the HomePod. Controls live in the toolbar popup.",
   "permissions": ["storage", "tabs"],
-  "icons": { "48": "icons/icon-white.svg", "96": "icons/icon-white.svg" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_title": "HomePod Sync",
     "default_popup": "popup.html",
-    "default_icon": "icons/icon.svg"
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "host_permissions": ["http://127.0.0.1:17645/*"],
   "background": {
